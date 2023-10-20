@@ -1,15 +1,18 @@
 use std::{hash::Hash, collections::{HashMap, HashSet}};
 
+use serde::{Serialize, Deserialize};
+
 use crate::collection;
 
-trait TableRecord: Clone {
+pub trait TableRecord: Clone {
 	type Key: Hash + Eq + Clone;
 	type Category: Hash + Eq + Clone;
 	fn categories(&self) -> Vec<Self::Category>;
 	fn key(&self) -> Self::Key;
 }
 
-struct Table<T: TableRecord> { // TODO: clone because closure in .upsert()
+#[derive(Debug, Clone)]
+pub struct Table<T: TableRecord> { // TODO: clone because closure in .upsert()
 	data: HashMap<T::Key, T>,
 	index: HashMap<T::Category, Vec<T::Key>>
 }
@@ -24,27 +27,32 @@ impl std::fmt::Display for KeyBusy {
 }
 
 impl<T: TableRecord> Table<T> {
-	fn new() -> Self {
+	pub fn new() -> Self {
 		Self { data: collection!(), index: collection!() }
 	}
 
-	fn len(&self) -> usize {
+	pub fn clear(&mut self) {
+		self.data.clear();
+		self.index.clear();
+	}
+
+	pub fn len(&self) -> usize {
 		self.data.len()
 	}
 
-	fn contains_key(&self, key: &T::Key) -> bool {
+	pub fn contains_key(&self, key: &T::Key) -> bool {
 		self.data.contains_key(key)
 	}
 
-	fn contains_val(&self, val: &T) -> bool {
+	pub fn contains_val(&self, val: &T) -> bool {
 		self.data.contains_key(&val.key())
 	}
 
-	fn contains_cat(&self, cat: &T::Category) -> bool {
+	pub fn contains_cat(&self, cat: &T::Category) -> bool {
 		self.index.contains_key(cat)
 	}
 
-	fn insert(&mut self, val: T) -> Result<(), KeyBusy> {
+	pub fn insert(&mut self, val: T) -> Result<(), KeyBusy> {
 		let key = val.key();
 		if self.data.contains_key(&key) {
 			return Err(KeyBusy);
@@ -58,7 +66,7 @@ impl<T: TableRecord> Table<T> {
 
 	/// Finds the object by old key, updates it. The key in the table is not updated.
 	// TODO: make it updated
-	fn upsert(&mut self, old_key: T::Key, new_val: T) {
+	pub fn upsert(&mut self, old_key: T::Key, new_val: T) {
 		let new_cats = vec2hashset(new_val.categories());
 		// do update
 		if self.contains_key(&old_key) {
@@ -69,7 +77,7 @@ impl<T: TableRecord> Table<T> {
 	}
 
 	// TODO: make it update the key change
-	fn update(&mut self, key: T::Key, cb: &impl Fn(&mut T)) -> bool {
+	pub fn update(&mut self, key: T::Key, cb: &impl Fn(&mut T)) -> bool {
 		let Some(mut val) = self.data.get_mut(&key) else { return false; };
 		let old_cats = vec2hashset(val.categories());
 		cb(&mut val);
@@ -84,7 +92,7 @@ impl<T: TableRecord> Table<T> {
 		true
 	}
 
-	fn update_by_cat(&mut self, cat: T::Category, cb: impl Fn(&mut T)) -> usize {
+	pub fn update_by_cat(&mut self, cat: T::Category, cb: impl Fn(&mut T)) -> usize {
 		// update multiple records found by category
 		let Some(keys) = self.index.get(&cat) else { return 0; };
 		let keys: Vec<T::Key> = keys.into_iter().map(|k| k.clone()).collect(); // TODO FIXME: ugly but required, because self.index.get borrows self immutably and it's still borrowed, while self.update requires mutable borrow.
@@ -95,7 +103,7 @@ impl<T: TableRecord> Table<T> {
 		updated
 	}
 
-	fn remove(&mut self, key: &T::Key) -> Option<T> {
+	pub fn remove(&mut self, key: &T::Key) -> Option<T> {
 		// get categories
 		let value = self.data.remove(key)?;
 		for cat in value.categories() {
@@ -104,15 +112,20 @@ impl<T: TableRecord> Table<T> {
 		Some(value)
 	}
 
-	fn get(&self, key: &T::Key) -> Option<&T> {
+	pub fn remove_cat(&mut self, cat: &T::Category) -> Vec<T> {
+		let Some(keys) = self.index.remove(cat) else { return vec![] };
+		keys.iter().filter_map(|k| self.data.remove(k)).collect()
+	}
+
+	pub fn get(&self, key: &T::Key) -> Option<&T> {
 		self.data.get(key)
 	}
 
-	fn find(&self, cat: &T::Category) -> Vec<&T> { // TODO: replace with iterator struct
+	pub fn find(&self, cat: &T::Category) -> Vec<&T> { // TODO: replace with iterator struct
 		self.index.get(cat).unwrap_or(&vec![]).iter().filter_map(|k| self.data.get(k)).collect()
 	}
 
-	fn find_many(&self, cats: &[T::Category]) -> Vec<&T> { // TODO: replace with iterator struct
+	pub fn find_many(&self, cats: &[T::Category]) -> Vec<&T> { // TODO: replace with iterator struct
 		let keys: HashSet<&T::Key> = cats.iter()
 			.filter_map(|c| self.index.get(c))
 			.flatten().collect();
@@ -121,25 +134,46 @@ impl<T: TableRecord> Table<T> {
 		keys.iter().filter_map(|k| self.data.get(k)).collect()
 	}
 
-	fn iter(&self) -> impl Iterator<Item = (&T::Key, &T)> {
+	pub fn iter(&self) -> impl Iterator<Item = (&T::Key, &T)> {
 		self.data.iter()
 	}
 
-	fn values(&self) -> impl Iterator<Item = &T> {
+	pub fn values(&self) -> impl Iterator<Item = &T> {
 		self.data.values()
 	}
 
-	fn iter_keys(&self) -> impl Iterator<Item = &T::Key> {
+	pub fn iter_keys(&self) -> impl Iterator<Item = &T::Key> {
 		self.data.keys()
 	}
 
-	fn iter_cats(&self) -> impl Iterator<Item = &T::Category> {
+	pub fn iter_cats(&self) -> impl Iterator<Item = &T::Category> {
 		self.index.keys()
 	}
 }
 
+
+
 fn vec2hashset<T: Hash + Eq>(data: Vec<T>) -> HashSet<T> {
 	data.into_iter().collect()
+}
+
+impl<T: TableRecord + Serialize> Serialize for Table<T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where S: serde::Serializer {
+        let data: Vec<T> = self.data.clone().into_values().collect();
+		data.serialize(serializer)
+    }
+}
+
+impl<'de, T: TableRecord + Deserialize<'de>> Deserialize<'de> for Table<T> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: serde::Deserializer<'de> {
+		let mut t: Table<T> = Table::new();
+		for item in Vec::deserialize(deserializer)?.into_iter() {
+			t.insert(item).unwrap();
+		}
+		Ok(t)
+    }
 }
 
 #[cfg(test)]
@@ -343,5 +377,4 @@ pub mod multimap_tests {
 		let expected: HashSet<usize> = collection!(1, 2, 3, 4);
 		assert_eq!(real, expected);
 	}
-
 }
