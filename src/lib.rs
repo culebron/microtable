@@ -1,8 +1,5 @@
 use std::{hash::Hash, collections::{HashMap, HashSet}};
-
 use serde::{Serialize, Deserialize};
-
-use crate::collection;
 
 pub trait TableRecord: Clone {
 	type Key: Hash + Eq + Clone;
@@ -35,7 +32,7 @@ impl std::fmt::Display for QueryError {
 
 impl<T: TableRecord> Table<T> {
 	pub fn new() -> Self {
-		Self { data: collection!(), index: collection!() }
+		Self { data: HashMap::new(), index: HashMap::new() }
 	}
 
 	pub fn clear(&mut self) {
@@ -65,7 +62,7 @@ impl<T: TableRecord> Table<T> {
 			return Err(QueryError::KeyCollision);
 		}
 		for cat in val.categories() {
-			self.index.entry(cat).or_insert_with(|| collection![]).insert(key.clone());
+			self.index.entry(cat).or_insert_with(|| HashSet::new()).insert(key.clone());
 		}
 		self.data.insert(key, val);
 		Ok(())
@@ -86,7 +83,6 @@ impl<T: TableRecord> Table<T> {
 		Ok(())
 	}
 
-	// TODO: make it update the key change
 	pub fn update_with(&mut self, old_key: T::Key, cb: &impl Fn(&mut T)) -> Result<(), QueryError>  {
 		let Some(val) = self.data.get(&old_key) else { return Err(QueryError::KeyNotFound); };
 		let mut val = val.clone();
@@ -103,7 +99,7 @@ impl<T: TableRecord> Table<T> {
 				self.index.entry(c.clone()).and_modify(|e| { e.remove(&old_key); });
 			}
 			for c in new_cats.difference(&old_cats) {
-				self.index.entry(c.clone()).or_insert_with(|| collection![]).insert(old_key.clone());
+				self.index.entry(c.clone()).or_insert_with(|| HashSet::new()).insert(old_key.clone());
 			}
 			self.clear_empty_categories();
 		}
@@ -113,10 +109,10 @@ impl<T: TableRecord> Table<T> {
 	pub fn update_by_cat(&mut self, cat: T::Category, cb: impl Fn(&mut T)) -> Result<usize, QueryError> {
 		// update multiple records found by category
 		let Some(keys) = self.index.get(&cat) else { return Ok(0); };
-		let keys: Vec<T::Key> = keys.into_iter().map(|k| k.clone()).collect(); // TODO FIXME: ugly but required, because self.index.get borrows self immutably and it's still borrowed, while self.update requires mutable borrow.
+		let keys: Vec<T::Key> = keys.into_iter().map(|k| k.clone()).collect(); // ugly but required, because self.index.get borrows self immutably and it's still borrowed, while self.update requires mutable borrow.
 		let update_count = keys.len();
 		// can fail if there's key collision. must run check beforehand
-		// callbacks are run and results are stored separately
+		// callbacks are run on copies, results are stored, then if all is ok, we can save the data with upsert
 		let mut updates: Vec<(T::Key, T)> = vec![];
 		for old_key in keys.into_iter() {
 			let mut item = self.data.get(&old_key).unwrap().clone();
@@ -127,8 +123,8 @@ impl<T: TableRecord> Table<T> {
 			}
 			updates.push((old_key, item));
 		}
-		for (k, v) in updates.into_iter() {
-			self.upsert(k, v).unwrap(); // already checked
+		for (old_key, new_val) in updates.into_iter() {
+			self.upsert(old_key, new_val).unwrap(); // already checked
 		}
 		Ok(update_count)
 	}
@@ -157,7 +153,8 @@ impl<T: TableRecord> Table<T> {
 	}
 
 	pub fn find(&self, cat: &T::Category) -> Vec<&T> { // TODO: replace with iterator struct
-		self.index.get(cat).unwrap_or(&collection![]).iter().filter_map(|k| self.data.get(k)).collect()
+		let Some(hs) = self.index.get(cat) else { return vec![] };
+		hs.iter().filter_map(|k| self.data.get(k)).collect()
 	}
 
 	pub fn find_many(&self, cats: &[T::Category]) -> Vec<&T> { // TODO: replace with iterator struct
@@ -356,6 +353,8 @@ pub mod multimap_tests {
 		assert!(!it.contains_key(&BookId(3)));
 		assert!(it.contains_key(&BookId(365)));
 		assert!(it.index.get(&BookCategory::Author(a2)).unwrap().contains(&BookId(365)));
+		// upserting with key collision must fail
+		assert!(it.upsert(BookId(2), Book { id: BookId(365), title: "Book №365".into(), science: s3, author: a2 }).is_err());
 		// less 1 book by author (a1)
 		let curr_author_books = it.find(&BookCategory::Author(b2.author)).len();
 		assert_eq!(prev_author_books - 1, curr_author_books);
@@ -364,9 +363,9 @@ pub mod multimap_tests {
 
 		// upsert a new book
 		// adds new category
-		it.upsert(BookId(10), Book { id: BookId(10), title: "Book 10".into(), science: ScienceId(30), author: a1});
+		it.upsert(BookId(10), Book { id: BookId(10), title: "Book 10".into(), science: ScienceId(30), author: a1}).unwrap();
 		// update book with no new category
-		it.upsert(BookId(10), Book { id: BookId(10), title: "Book №10".into(), science: ScienceId(31), author: a1});
+		it.upsert(BookId(10), Book { id: BookId(10), title: "Book №10".into(), science: ScienceId(31), author: a1}).unwrap();
 		assert_eq!(it.len(), old_len + 1);
 	}
 
@@ -377,15 +376,17 @@ pub mod multimap_tests {
 		let books = books_fixture();
 		let b3 = books[2].clone();
 
-		// update category: set category 2 to 3 (also checking for collision of editing/reading categories and writing)
-		it.update_by_cat(BookCategory::Science(ScienceId(3)), |b| b.science = ScienceId(4));
+		// update category: set category 23 to 24 (also checking for collision of editing/reading categories and writing)
+		it.update_by_cat(BookCategory::Science(ScienceId(23)), |b| b.science = ScienceId(24)).unwrap();
 
 		let old_len = it.len();
 		it.remove(&BookId(1));
 		assert_eq!(old_len - 1, it.len());
 
+		let c = |b: &mut Book| b.author = a2;
 		// update non existent book
-		assert!(it.update_with(BookId(123456), &|b| b.author = a2).is_err()); // must return false
+		assert!(it.update_with(BookId(123456), &c).is_err()); // must return err
+		assert!(it.update_with(BookId(4), &c).is_ok()); // must return ok
 
 		assert_eq!(it.get(&BookId(3)), Some(&b3));
 		assert_eq!(it.get(&BookId(654321)), None);
@@ -417,7 +418,7 @@ pub mod multimap_tests {
 	fn find_many() {
 		let it = table_fixture();
 		let real: HashSet<_> = it.find_many(&[BookCategory::Science(ScienceId(22)), BookCategory::Author(AuthorId(10))]).iter().map(|b| b.id.0).collect();
-		let expected: HashSet<usize> = collection!(1, 2, 3, 4);
+		let expected: HashSet<usize> = HashSet::from([1, 2, 3, 4]);
 		assert_eq!(real, expected);
 	}
 }
