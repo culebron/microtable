@@ -1,4 +1,5 @@
 use std::{hash::Hash, collections::{HashMap, HashSet}};
+#[cfg(feature="serde")]
 use serde::{Serialize, Deserialize};
 
 pub trait TableRecord: Clone {
@@ -162,7 +163,7 @@ impl<T: TableRecord> Table<T> {
 			.filter_map(|c| self.index.get(c))
 			.flatten().collect();
 
-		 // Vec<T>s into T-s
+		// Vec<T>s into T-s
 		keys.iter().filter_map(|k| self.data.get(k)).collect()
 	}
 
@@ -189,16 +190,18 @@ fn vec2hashset<T: Hash + Eq>(data: Vec<T>) -> HashSet<T> {
 	data.into_iter().collect()
 }
 
+#[cfg(feature="serde")]
 impl<T: TableRecord + Serialize> Serialize for Table<T> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+	fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where S: serde::Serializer {
-        let data: Vec<T> = self.data.clone().into_values().collect();
+		let data: Vec<T> = self.data.clone().into_values().collect();
 		data.serialize(serializer)
     }
 }
 
+#[cfg(feature="serde")]
 impl<'de, T: TableRecord + Deserialize<'de>> Deserialize<'de> for Table<T> {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+	fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where D: serde::Deserializer<'de> {
 		let mut t: Table<T> = Table::new();
 		for item in Vec::deserialize(deserializer)?.into_iter() {
