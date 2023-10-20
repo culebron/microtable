@@ -1,5 +1,7 @@
 # Data Structure like both HashMap and a database table
 
+This is a data structure that allows saving objects with unique ID (key) and be searched by other discrete fields (categories). It also can be serialized with Serde (feature `"serde"`).
+
 ## Usecase
 
 Sometimes you have a collection and need to search items of it by different attributes. For example, we want to search books not just by their unique ID, but by author, or topic.
