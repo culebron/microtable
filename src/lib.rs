@@ -2,7 +2,7 @@ use std::{hash::Hash, collections::{HashMap, HashSet}};
 #[cfg(feature="serde")]
 use serde::{Serialize, Deserialize};
 
-pub trait TableRecord: Clone {
+pub trait MicroRecord: Clone {
 	type Key: Hash + Eq + Clone;
 	type Category: Hash + Eq + Clone;
 	fn categories(&self) -> Vec<Self::Category>;
@@ -10,28 +10,28 @@ pub trait TableRecord: Clone {
 }
 
 #[derive(Debug, Clone)]
-pub struct Table<T: TableRecord> { // TODO: clone because closure in .upsert()
+pub struct MicroTable<T: MicroRecord> {
 	data: HashMap<T::Key, T>,
 	index: HashMap<T::Category, HashSet<T::Key>>
 }
 
 #[derive(Debug)]
-pub enum QueryError {
-	KeyCollision,
-	KeyNotFound,
+pub enum KeyError {
+	Collision,
+	NotFound,
 }
-impl std::error::Error for QueryError {}
-impl std::fmt::Display for QueryError {
+impl std::error::Error for KeyError {}
+impl std::fmt::Display for KeyError {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		let s = match self {
-			Self::KeyCollision => "key is busy",
-			Self::KeyNotFound => "key not found"
+			Self::Collision => "key is busy",
+			Self::NotFound => "key not found"
 		};
 		f.write_fmt(format_args!("{}", s))
     }
 }
 
-impl<T: TableRecord> Table<T> {
+impl<T: MicroRecord> MicroTable<T> {
 	pub fn new() -> Self {
 		Self { data: HashMap::new(), index: HashMap::new() }
 	}
@@ -57,10 +57,10 @@ impl<T: TableRecord> Table<T> {
 		self.index.contains_key(cat)
 	}
 
-	pub fn insert(&mut self, val: T) -> Result<(), QueryError> {
+	pub fn insert(&mut self, val: T) -> Result<(), KeyError> {
 		let key = val.key();
 		if self.data.contains_key(&key) {
-			return Err(QueryError::KeyCollision);
+			return Err(KeyError::Collision);
 		}
 		for cat in val.categories() {
 			self.index.entry(cat).or_insert_with(|| HashSet::new()).insert(key.clone());
@@ -70,11 +70,10 @@ impl<T: TableRecord> Table<T> {
 	}
 
 	/// Finds the object by old key, updates it. The key in the table is not updated.
-	// TODO: make it updated
-	pub fn upsert(&mut self, key: T::Key, new_val: T) -> Result<(), QueryError> {
+	pub fn upsert(&mut self, key: T::Key, new_val: T) -> Result<(), KeyError> {
 		let new_key = new_val.key();
 		if new_key != key && self.data.contains_key(&new_key) {
-			return Err(QueryError::KeyCollision);
+			return Err(KeyError::Collision);
 		}
 		if self.contains_key(&key) {
 			self.update_with(key, &|old_val| *old_val = new_val.clone()).unwrap(); // unwrap because checked in .contains_key
@@ -84,8 +83,8 @@ impl<T: TableRecord> Table<T> {
 		Ok(())
 	}
 
-	pub fn update_with(&mut self, old_key: T::Key, cb: &impl Fn(&mut T)) -> Result<(), QueryError>  {
-		let Some(val) = self.data.get(&old_key) else { return Err(QueryError::KeyNotFound); };
+	pub fn update_with(&mut self, old_key: T::Key, cb: &impl Fn(&mut T)) -> Result<(), KeyError>  {
+		let Some(val) = self.data.get(&old_key) else { return Err(KeyError::NotFound); };
 		let mut val = val.clone();
 		let old_cats = vec2hashset(val.categories());
 		cb(&mut val);
@@ -107,7 +106,7 @@ impl<T: TableRecord> Table<T> {
 		Ok(())
 	}
 
-	pub fn update_by_cat(&mut self, cat: T::Category, cb: impl Fn(&mut T)) -> Result<usize, QueryError> {
+	pub fn update_by_cat(&mut self, cat: T::Category, cb: impl Fn(&mut T)) -> Result<usize, KeyError> {
 		// update multiple records found by category
 		let Some(keys) = self.index.get(&cat) else { return Ok(0); };
 		let keys: Vec<T::Key> = keys.into_iter().map(|k| k.clone()).collect(); // ugly but required, because self.index.get borrows self immutably and it's still borrowed, while self.update requires mutable borrow.
@@ -120,7 +119,7 @@ impl<T: TableRecord> Table<T> {
 			cb(&mut item);
 			let new_key = item.key();
 			if new_key != old_key && self.contains_key(&new_key) {
-				return Err(QueryError::KeyCollision);
+				return Err(KeyError::Collision);
 			}
 			updates.push((old_key, item));
 		}
@@ -153,12 +152,12 @@ impl<T: TableRecord> Table<T> {
 		self.data.get(key)
 	}
 
-	pub fn find(&self, cat: &T::Category) -> Vec<&T> { // TODO: replace with iterator struct
+	pub fn find(&self, cat: &T::Category) -> Vec<&T> { // TODO: replace with iterator struct?
 		let Some(hs) = self.index.get(cat) else { return vec![] };
 		hs.iter().filter_map(|k| self.data.get(k)).collect()
 	}
 
-	pub fn find_many(&self, cats: &[T::Category]) -> Vec<&T> { // TODO: replace with iterator struct
+	pub fn find_many(&self, cats: &[T::Category]) -> Vec<&T> { // TODO: replace with iterator struct?
 		let keys: HashSet<&T::Key> = cats.iter()
 			.filter_map(|c| self.index.get(c))
 			.flatten().collect();
@@ -191,7 +190,7 @@ fn vec2hashset<T: Hash + Eq>(data: Vec<T>) -> HashSet<T> {
 }
 
 #[cfg(feature="serde")]
-impl<T: TableRecord + Serialize> Serialize for Table<T> {
+impl<T: MicroRecord + Serialize> Serialize for MicroTable<T> {
 	fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where S: serde::Serializer {
 		let data: Vec<T> = self.data.clone().into_values().collect();
@@ -200,10 +199,10 @@ impl<T: TableRecord + Serialize> Serialize for Table<T> {
 }
 
 #[cfg(feature="serde")]
-impl<'de, T: TableRecord + Deserialize<'de>> Deserialize<'de> for Table<T> {
+impl<'de, T: MicroRecord + Deserialize<'de>> Deserialize<'de> for MicroTable<T> {
 	fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where D: serde::Deserializer<'de> {
-		let mut t: Table<T> = Table::new();
+		let mut t: MicroTable<T> = MicroTable::new();
 		for item in Vec::deserialize(deserializer)?.into_iter() {
 			t.insert(item).unwrap();
 		}
@@ -237,7 +236,7 @@ pub mod multimap_tests {
 		author: AuthorId,
 	}
 
-	impl TableRecord for Book {
+	impl MicroRecord for Book {
 		type Key = BookId;
 		type Category = BookCategory;
 		fn categories(&self) -> Vec<Self::Category> {
@@ -270,8 +269,8 @@ pub mod multimap_tests {
 		]
 	}
 
-	fn table_fixture() -> Table<Book> {
-		let mut it: Table<Book> = Table::new();
+	fn table_fixture() -> MicroTable<Book> {
+		let mut it: MicroTable<Book> = MicroTable::new();
 		let books = books_fixture();
 
 		for b  in books.clone().into_iter() {
@@ -347,7 +346,7 @@ pub mod multimap_tests {
 		let b2 = books[1].clone();
 		// find books by book 2 author (a1)
 		let prev_author_books = it.find(&BookCategory::Author(b2.author)).len();
-		// TODO: what if we try to change the key? Should check for collisions?
+
 		assert!(it.upsert(BookId(2), Book { id: BookId(2), title: "Book №5".into(), science: s3, author: a0 }).is_ok());
 		assert!(it.contains_key(&BookId(3)));
 		assert!(!it.contains_key(&BookId(365)));
